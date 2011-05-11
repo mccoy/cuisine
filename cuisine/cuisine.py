@@ -546,7 +546,8 @@ def service_ensure( name, runlevels=None, restart=False):
 #        - the file_write function seems a bit strange; why not use fabric.apt.get() to pull a copy,
 #          put it into a tmpfile, manipulate the tmpfile, and the fabric.api.put() it back?  If we
 #          are concerned about safety we can put the file to a remote tmpfile and then mv it into
-#          place.
+#          place.  If this is done, use "find <<filename>> -prune -printf '%m %U %G\n'" to get the
+#          perms, owner, and group so that we can reset them afterwards.
 
 ## JIM: package installs need to go back and do a check to make sure the package is installed (should upgrade
 ## check to make sure a newer rev is installed?) and return proper .success or .failure.  We can't just
