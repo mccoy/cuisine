@@ -9,7 +9,7 @@
 # -----------------------------------------------------------------------------
 
 import fabric, fabric.api, fabric.context_managers
-import os, base64, bz2, string, re
+import os, base64, bz2, string, re, time
 
 __doc__ = """
 Cuisine makes it easy to write automatic server installation and configuration
@@ -29,6 +29,41 @@ Note that right now, Cuisine only supports Debian-based Linux systems.
 MODE = "user"
 RE_SPACES = re.compile("[\s\t]+")
 
+##
+##
+##  Note to anyone seeing this fork right now:  I am a bad person and I am going
+##  to leave my various notes about things to do scattered in this file instead of
+##  pushing a clean branch up to github and using a local branch for these notes.
+##  Sorry about being lazy, but if you see a comment prefixed with JIM: then this
+##  is just a note to myself so that I do not forget to fix/finish something...
+##
+##
+
+## Jim's Changelog:
+##     - Added redhat/yum compatibity and a bit of framework for dealing with distros.
+##     - Added a few more options for some functions.
+##     - Changed a lot of run() calls into sudo() calls since the general purpose
+##       of this package is sysadmin tasks and a lot of them require running as root.
+##     - Cleaned up the package installation bits to remove some extraneous remote calls
+##       that did things like check for existing installs when just blindly re-running
+##       the install would have no downside.
+##     - The "update" arg in package management functions used to update the package
+##       manager cache, now the updates happen automatically after a certain amount of
+##       time and the "upgrade" option was added to package management functions to
+##       signal when we want to upgrade a package if possible.
+##     - The passwd file manipulation functions can now also update user passwords.
+##     - The minimal service checker was expanded to now start/stop services and to
+##       set services to start up at various runlevels.
+##     - ssh_keygen can now do rsa keys in addition to dsa keys
+
+# JIM: Assume that systems do not switch back and forth between debian/redhat more
+# often than you import/run this module...  The HOST_INFO_MAP bits should probably
+# get stuffed into some part of env, but for now it is a module global variable (another
+# option in the interim would be to make this a module-level singleton object with the
+# right property attrs to know when to do lookups, etc.)  [Examine how tav's fabric modes
+# do the config_file bits and go with that...]
+HOST_INFO_MAP={}
+PKG_DB_UPDATE_FREQ=300
 
 def mode_user():
 	"""Cuisine functions will be executed as the current user."""
@@ -134,7 +169,7 @@ def local_read( location ):
 
 def file_read( location ):
 	"""Reads the *remote* file at the given location."""
-	return run("cat '%s'" % (location))
+	return sudo("cat '%s'" % (location))
 
 def file_exists( location ):
 	"""Tests if there is a *remote* file at the given location."""
@@ -143,9 +178,9 @@ def file_exists( location ):
 def file_attribs(location, mode=None, owner=None, group=None, recursive=False):
 	"""Updates the mode/owner/group for the remote file at the given location."""
 	recursive = recursive and "-R " or ""
-	if mode:  run("chmod %s %s '%s'" % (recursive, mode,  location))
-	if owner: run("chown %s %s '%s'" % (recursive, owner, location))
-	if group: run("chgrp %s %s '%s'" % (recursive, group, location))
+	if mode:  sudo("chmod %s %s '%s'" % (recursive, mode,  location))
+	if owner: sudo("chown %s %s '%s'" % (recursive, owner, location))
+	if group: sudo("chgrp %s %s '%s'" % (recursive, group, location))
 	
 def file_write( location, content, mode=None, owner=None, group=None ):
 	"""Writes the given content to the file at the given remote location, optionally
@@ -189,79 +224,206 @@ def dir_exists( location ):
 
 def dir_ensure( location, recursive=False, mode=None, owner=None, group=None ):
 	"""Ensures that there is a remote directory at the given location, optionnaly
-	updating its mode/owner/group."""
-	if not dir_exists(location):
-		run("mkdir %s '%s'" % (recursive and "-p" or "", location))
-		dir_attribs(location, mode, owner, group, recursive)
+	updating its mode/owner/group.
+
+	If we are not updating the owner/group then this can be done as a single
+	ssh call, so use that method, otherwise set owner/group after creation."""
+	if mode:
+		mode_arg = "-m %s" % (mode)
+	else:
+		mode_arg = ""
+	sudo("(test -d '%s' || mkdir %s %s '%s') && echo OK ; true" % (location, recursive and "-p" or "", mode_arg, location))
+	if owner or group:
+		dir_attribs(location, owner=owner, group=group)
 
 def command_check( command ):
 	"""Tests if the given command is available on the system."""
-	return run("which '%s' && echo OK ; true" % command).endswith("OK")
+	return run("which '%s' >& /dev/null && echo OK ; true" % command).endswith("OK")
 
-def package_update( package=None ):
-	"""Updates the package database (when no argument) or update the package
-	or list of packages given as argument."""
-	if package == None:
-		run("sudo apt-get --yes update")
+def distro_check():
+	"""Determines the distro and package manager for a remote host and caches it for future reference"""
+	global HOST_INFO_MAP
+	if env.host in HOST_INFO_MAP and 'distro' in HOST_INFO_MAP[env.host].keys():
+		return HOST_INFO_MAP[env.host]
+	distro_check=r"""if [ -r /etc/lsb-release ]; then
+echo $(grep 'DISTRIB_ID' /tmp/lsb-release | sed 's/DISTRIB_ID=//' | head -1 | tr '[:upper:]' '[:lower:]');
+else
+echo $(find /etc/ -maxdepth 1 -name '*[-_]release' -o -name '*[-_]version' 2> /dev/null |
+sed 's#/etc/##;s/[_-]version//;s/[-_]release//' | head -1 | tr '[:upper:]' '[:lower:]');
+fi"""
+	package_manager_check=r"""(which yum >& /dev/null && echo 'yum' || which apt-get >& /dev/null && echo 'apt-get'); true"""
+	distro = run(distro_check)
+	if len(distro) == 0:
+		HOST_INFO_MAP[env.host]['distro']=None
 	else:
-		if type(package) in (list,tuple): package = " ".join(package)
-		run("sudo apt-get --yes upgrade " + package)
-	
-def package_install( package, update=False ):
-	"""Installs the given package/list of package, optionnaly updating the package
-	database."""
-	if update: run("sudo apt-get --yes update")
-	if type(package) in (list,tuple): package = " ".join(package)
-	run("sudo apt-get --yes install %s" % (package))
+		HOST_INFO_MAP[env.host]['distro']=distro
+	package_manager = run(package_manager_check)
+	if len(package_manager) == 0:
+		HOST_INFO_MAP[env.host]['pkg_mgr']=None
+	else:
+		HOST_INFO_MAP[env.host]['pkg_mgr']=package_manager
+       	if package_manager == "apt-get":
+		helper_check = run("which apt-file >& /dev/null %% echo 'apt-file'")
+		if len(helper_check) > 0:
+			HOST_INFO_MAP[env.host].setdefault('pkg_mgr_helpers', []).append('apt-file')
+	return HOST_INFO_MAP[env.host]
 
+def package_db_update( force=False ):
+	"""Update the package datebase if necessary."""
+	now=time.time()
+	global PKG_DB_UPDATE_FREQ
+	global HOST_INFO_MAP
+	distro_info = distro_check()
+	last_check = distro_info.get('db_update', 0)
+	if force or last_check+PKG_DB_UPDATE_FREQ < now:
+		package_manager=distro_info.get('pkg_mgr')
+		if package_manager == 'yum':
+			sudo("yum makecache")
+			HOST_INFO_MAP[env.host]['db_update'] = now
+		elif package_manager == 'apt-get':
+			sudo("apt-get --yes update")
+			if 'apt-file' in distro_info.get('pkg_mgr_helpers', []):
+				sudo("apt-file update")
+			HOST_INFO_MAP[env.host]['db_update'] = now
+
+def package_update( package, db_update=False ):
+	"""Update the package or list of packages given as argument."""
+	package_db_update(db_update)
+	if type(package) in (list,tuple): package = " ".join(package)
+	package_manager=distro_check().get('pkg_mgr')
+	if package_manager == 'yum':
+		sudo("yum upgrade -y " +package)
+	elif package_manager == 'apt-get':
+		sudo("apt-get --yes upgrade " + package)
+
+def package_install( package, upgrade=False, db_update=False ):
+	"""Installs the given package/list of package, optionaly upgrading an already
+	installed package."""
+	package_db_update(db_update)
+	if upgrade:
+		package_update(package)
+	if type(package) in (list,tuple): package = " ".join(package)
+	package_manager=distro_check().get('pkg_mgr')
+	if package_manager == 'apt-get':
+		sudo("apt-get --yes install " + package)
+	elif package_manager == 'yum':
+		sudo("yum install -y " +package)
+
+def package_localinstall( package_path ):
+	"""Install a package that is found in a particular filesystem path instead of
+	using the availabler repositories."""
+	package_manager=distro_check().get('pkg_mgr')
+	if package_manager == 'apt-get':
+		# JIM: One limitation to apt-get is that it does not install local packages, but
+		# by dropping down to dpkg we lose the ability to automatically pick up
+		# dependencies for the package being installed.  Long-term solution is the following:
+		#
+		#  1) TMPDEBS = mktmp -d localdebs.XXXXXXXX
+		#  2) fabric.api.put(package_path, <<TMPDEBS>>
+		#  3) See if package with same name exists to see what section it belongs in
+		#  4) echo "<<pkgname>> high <<section_name or 'contrib'>>" > <<TMPDEBS>>/localdebs_overrides
+		#  5) dpkg-scanpackages <<TMPDEBS>> localdebs_overrides | gzip > <<TMPDRBS>>/Packages.gz
+		#  6) mv /etc/sources.list /etc/sources.list-localdebs && echo "deb file:/tmp <<TMPDEBS>>/" && cat /etc/sources.list-localdevs >> /etc/sources.list
+		#  7) apt-get --yes update
+		#  8) Install package(s)
+		#  9) mv /etc/sources.list-localdevs /etc/sources.list
+		#  10) rm -rf <<TMPDEBS>>
+		#  11) apt-get --yes update
+		sudo("(test -f %s && which dpkg >& /dev/null) && dpgk -i %s" % (package_path, package_path))
+	elif package_manager == 'yum':
+		sudo("test -f %s && yum -y localinstall --nogpg %s" % (package_path, package_path))
+
+## JIM: Setting this as a multiargs command is a mistake.  If we are running ensure on multiple
+## packages then we want to do them as a single yum/apt-get package in case there are
+## circular dependencies in the installation; fewer calls to the remote box.  I think it was
+## set up with a multiargs decorator because the original code is doing an unnecessary check
+## to see if the package is already installed when the package installers will still work if
+## you install an already-installed package.
 @multiargs
-def package_ensure( package ):
-	"""Tests if the given package is installed, and installes it in case it's not
-	already there."""
-	if run("dpkg -s %s | grep 'Status:' ; true" % package).find("installed") == -1:
+def package_ensure( package, upgrade=False, db_update=False ):
+	## JIM: Don't really need to check if it is installed, as the package_install command
+	## will check this for us and not do unnecessary work.
+	"""Ensures that a given package is installed, upgrading it if necessary and updating
+	the package installer db if requested."""
+	if run("dpkg -s %s 2>&1 | grep 'Status:' ; true" % package).find("installed") == -1:
 		package_install(package)
 
+
+## JIM: UPdate this to use "yum provides" for yum setups and to check to see if apt-file exists
+## and use that if possible on apt setups.  
 def command_ensure( command, package=None ):
-	"""Ensures that the given command is present, if not installs the package with the given
-	name, which is the same as the command by default."""
-	if package is None: package = command
-	if not command_check(command): package_install(package)
+	"""Ensures that the given command is present, installs provided package if we can't
+	otherwise figure out the package that provides the command."""
+	if not command_check(command):
+		distro_info = distro_check()
+		package_manager = distro_info.get('pkg_mgr')
+		if package_manager == 'apt-get' and 'apt-file' in distro_info.get('pkg_mgr_helper', []):
+			package_managert == 'apt-file'
+		if package_manager == 'yum':
+			provides_output = run('yum provides %s' % (command))
+			## JIM: Parse it  (grab ([a-zA-Z-_])+-[0-9])
+		elif package_manager == 'apt-file':
+			provides_output = run("apt-file search %s" % (command))
+			## JIM: Parse it
+		elif package_manager == 'apt-get':
+			if not package:
+				package = command
+		package_install(package)
 	assert command_check(command), "Command was not installed, check for errors: %s" % (command)
 
-def user_create( name, home=None, uid=None, gid=None ):
-	"""Creates the user with the given name, optionally giving a specific home/uid/gid."""
+def user_create( name, passwd=None, home=None, uid=None, gid=None, shell=None, uid_min=None, uid_max=None):
+	"""Creates the user with the given name, optionally giving a specific password/home/uid/gid/shell."""
 	options = ["-m"]
+	if passwd: options.append("-p '%s'" % (passwd))
 	if home: options.append("-d '%s'" % (home))
 	if uid:  options.append("-u '%s'" % (uid))
 	if gid:  options.append("-g '%s'" % (gid))
-	run("useradd %s '%s'" % (" ".join(options), name))
+	if shell: options.append("-s '%s'" % (shell))
+	if uid_min:  options.append("-K UID_MIN='%s'" % (uid_min))
+	if uid_max:  options.append("-K UID_MAX='%s'" % (uid_max))
+	sudo("useradd %s '%s'" % (" ".join(options), name))
 
 def user_check( name ):
 	"""Checks if there is a user defined with the given name, returning its information
 	as a '{"name":<str>,"uid":<str>,"gid":<str>,"home":<str>,"shell":<str>}' or 'None' if
 	the user does not exists."""
 	d = run("cat /etc/passwd | egrep '^%s:' ; true" % (name))
+	s = sudo("cat /etc/shadow | egrep '^%s:' | awk -F':' '{print $2}'")
+	results = {}
 	if d:
 		d = d.split(":")
-		return dict(name=d[0],uid=d[2],gid=d[3],home=d[5],shell=d[6])
+		results = dict(name=d[0],uid=d[2],gid=d[3],home=d[5],shell=d[6])
+	if s:
+		results['passwd']=s
+	if results:
+		return results
 	else:
 		return None
 
-def user_ensure( name, home=None, uid=None, gid=None ):
-	"""Ensures that the given users exists, optionnaly updating its home/uid/gid."""
+def user_ensure( name, passwd=None, home=None, uid=None, gid=None, shell=None):
+	"""Ensures that the given users exists, optionally updating their passwd/home/uid/gid/shell."""
 	d = user_check(name)
 	if not d:
-		user_create(name, home, uid, gid)
+		user_create(name, passwd, home, uid, gid, shell)
 	else:
-		if home != None and d["home"] != home: assert False, "Not implemented"
-		if uid  != None and d["uid"]  != uid:  assert False, "Not implemented"
-		if gid  != None and d["gid"]  != gid:  assert False, "Not implemented"
+		options=[]
+		if passwd != None and d.get('passwd') != passwd:
+			options.append("-p '%s'" % (passwd))
+		if home != None and d.get("home") != home:
+			options.append("-d '%s'" % (home))
+		if uid  != None and d.get("uid") != uid:
+			options.append("-u '%s'" % (uid))
+		if gid  != None and d.get("gid") != gid:
+			options.append("-g '%s'" % (gid))
+		if shell != None and d.get("shell") != shell:
+			options.append("-s '%s'" % (shell))
+		sudo("usermod %s '%s'" % (" ".join(options), name))
 
 def group_create( name, gid=None ):
-	"""Creates a group with the given name, and optionnaly given gid."""
+	"""Creates a group with the given name, and optionally given gid."""
 	options = []
 	if gid:  options.append("-g '%s'" % (gid))
-	run("sudo groupadd %s '%s'" % (" ".join(options), name))
+	sudo("groupadd %s '%s'" % (" ".join(options), name))
 
 def group_check( name ):
 	"""Checks if there is a group defined with the given name, returning its information
@@ -280,7 +442,8 @@ def group_ensure( name, gid=None ):
 	if not d:
 		group_create(name, gid)
 	else:
-		if gid  != None and d["gid"]  != gid:  assert False, "Not implemented"
+		if gid != None and d.get("gid") != gid:
+			sudo("groupmod -g %s '%s'" % (gid, name))
 
 def group_user_check( group, user ):
 	"""Checks if the given user is a member of the given group. It will return 'False'
@@ -291,6 +454,8 @@ def group_user_check( group, user ):
 	else:
 		return user in d["members"]
 
+## JIM: This is doing a lot of round-trips using the funky file_write bits, should
+#       be changed to make a local copy, update that copy, and push it back.
 @multiargs
 def group_user_add( group, user ):
 	"""Adds the given user/list of users to the given group/groups."""
@@ -307,19 +472,25 @@ def group_user_add( group, user ):
 		text = "\n".join(lines)
 		file_write("/etc/group", text)
 
-def ssh_keygen( user ):
-	"""Generates a pair of DSA keys in the user's home .ssh directory."""
+def group_user_ensure( group, user):
+	"""Ensure that a given user is a member of a given group."""
+	d = group_check(group)
+	if user not in d["members"]:
+		group_user_add(group, user)
+
+def ssh_keygen( user, keytype="dsa" ):
+	"""Generates a pair of ssh keys in the user's home .ssh directory."""
 	d = user_check(user)
 	assert d, "User does not exist: %s" % (user)
 	home = d["home"]
-	if not file_exists(home + "/.ssh/id_dsa.pub"):
+	if not file_exists(home + "/.ssh/id_%s.pub" % keytype):
 		dir_ensure(home + "/.ssh", mode="0700", owner=user, group=user)
-		run("ssh-keygen -q -t dsa -f '%s/.ssh/id_dsa' -N ''" % (home))
-		file_attribs(home + "/.ssh/id_dsa",     owner=user, group=user)
-		file_attribs(home + "/.ssh/id_dsa.pub", owner=user, group=user)
+		run("ssh-keygen -q -t %s -f '%s/.ssh/id_%s' -N ''" % (home, keytype, keytype))
+		file_attribs(home + "/.ssh/id_%s" % keytype,     owner=user, group=user)
+		file_attribs(home + "/.ssh/id_%s.pub" % keytype, owner=user, group=user)
 
 def ssh_authorize( user, key ):
-	"""Adds the give key to the '.ssh/authorized_keys' for the given user."""
+	"""Adds the given key to the '.ssh/authorized_keys' for the given user."""
 	d    = user_check(user)
 	keyf = d["home"] + "/.ssh/authorized_keys"
 	if file_exists(keyf):
@@ -328,11 +499,57 @@ def ssh_authorize( user, key ):
 	else:
 		file_write(keyf, key)
 
-def upstart_ensure( name ):
-	"""Ensures that the given upstart service is running, restarting it if necessary"""
-	if sudo("status "+ name ).find("/running") >= 0:
-		sudo("restart " + name)
-	else:
-		sudo("start " + name)
+def service_stop(name, no_start=False):
+	"""Stop a service, clearing its runlevels if requested."""
+	if distro_check().get("distro") in ("debian", "ubuntu"):
+		sudo("stop %s" % name)
+		if no_start:
+			sudo("update-rc.d -f %s remove" % name)
+	elif distro_check().get("distro") in ("redhat", "fedora"):
+		sudo("service %s stop" % name)
+		if no_start:
+			sudo("chkconfig %s off" % name)
+	elif distro_check().get("distro") in ("gentoo"):
+		sudo("stop %s" % name)
+		if no_start:
+			sudo("rc-update del %s default" % name)
+	
+def service_ensure( name, runlevels=None, restart=False):
+	"""Ensure that a named service is running (or restart) and set runlevels."""
+	if distro_check().get("distro") in ("debian", "ubuntu"):
+		if restart:
+			sudo("restart %s" % name)
+		else:
+			sudo("start %s" % name)
+		if runlevels: # Upstart is not as fine-grained as chkconfig, so we use "defaults"
+			sudo("update-rc.d %s defaults" % (name))
+	elif distro_check().get("distro") in ("redhat", "fedora"):
+		if restart:
+			sudo("service %s restart" % name)
+		else:
+			sudo("service %s start" % name)
+		if runlevels:
+			sudo("chkconfig --levels %s %s on" % (runlevels, name))
+	elif distro_check().get("distro") in ("gentoo"):
+		if restart:
+			sudo("restart %s" % name)
+		else:
+			sudo("start %s" % name)
+		if runlevels: # Upstart is not as fine-grained as chkconfig, so we use "defaults"
+			sudo("rc-update add %s default" % (name))	
+
+
+# JIM: still missing --
+#        - kernel params and sysctl checking/config
+#        - network config and net devices
+#        - templating that is better than basic python string templating (necessary?  tempita?)
+#        - the file_write function seems a bit strange; why not use fabric.apt.get() to pull a copy,
+#          put it into a tmpfile, manipulate the tmpfile, and the fabric.api.put() it back?  If we
+#          are concerned about safety we can put the file to a remote tmpfile and then mv it into
+#          place.
+
+## JIM: package installs need to go back and do a check to make sure the package is installed (should upgrade
+## check to make sure a newer rev is installed?) and return proper .success or .failure.  We can't just
+## blindly trust that things will work...
 
 # EOF - vim: ts=4 sw=4 noet
