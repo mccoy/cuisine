@@ -1,0 +1,43 @@
+"""
+Non-init module for doing convenient * imports from.
+
+"""
+from cuisine import (
+    text_get_line,
+    text_normalize,
+    text_nospace,
+    text_replace_line,
+    text_ensure_line,
+    text_strip_margin,
+    text_template,
+    local_read
+    file_read,
+    file_exists,
+    file_attribs,
+    file_write,
+    file_update,
+    file_append,
+    dir_attribs,
+    dir_exists,
+    dir_ensure,
+    command_check,
+    package_db_update,
+    package_update,
+    package_install,
+    package_localinstall,
+    package_ensure,
+    command_ensure,
+    user_create,
+    user_check,
+    user_ensure,
+    group_create,
+    group_check,
+    group_ensure,
+    group_user_check,
+    group_user_add,
+    group_user_ensure,
+    ssh_keygen,
+    ssh_authorize,
+    service_stop,
+    service_ensure,
+    )

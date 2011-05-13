@@ -181,6 +181,13 @@ def file_attribs(location, mode=None, owner=None, group=None, recursive=False):
 	if mode:  sudo("chmod %s %s '%s'" % (recursive, mode,  location))
 	if owner: sudo("chown %s %s '%s'" % (recursive, owner, location))
 	if group: sudo("chgrp %s %s '%s'" % (recursive, group, location))
+
+def get_fs_attribs(location):
+	"""Get the mode, owner, and group for a remote file."""
+	fs_check = sudo("test -e '%s' && find '%s' -prune -printf '%s %U %G\n'")
+	if len(fs_check) > 0:
+		(mode, owner, group) = fs_check.split("")
+		return {'mode': mode, 'owner': owner, 'group':group }
 	
 def file_write( location, content, mode=None, owner=None, group=None ):
 	"""Writes the given content to the file at the given remote location, optionally
@@ -350,7 +357,7 @@ def package_ensure( package, upgrade=False, db_update=False ):
 
 
 ## JIM: UPdate this to use "yum provides" for yum setups and to check to see if apt-file exists
-## and use that if possible on apt setups.  
+## and use that if possible on apt setups.    Update the "command" arg so that we escape file glob chars like * & ?
 def command_ensure( command, package=None ):
 	"""Ensures that the given command is present, installs provided package if we can't
 	otherwise figure out the package that provides the command."""
@@ -358,10 +365,11 @@ def command_ensure( command, package=None ):
 		distro_info = distro_check()
 		package_manager = distro_info.get('pkg_mgr')
 		if package_manager == 'apt-get' and 'apt-file' in distro_info.get('pkg_mgr_helper', []):
-			package_managert == 'apt-file'
+			package_manager == 'apt-file'
 		if package_manager == 'yum':
-			provides_output = run('yum provides %s' % (command))
-			## JIM: Parse it  (grab ([a-zA-Z-_])+-[0-9])
+			provides_output = run("yum -d 1 provides '%s' 2> /dev/null | egrep -v '^$|^ |^Matched|^Other|^Repo' | awk -F':' '{print $1}'" % (command))
+			if len(provides_ouput) > 0:
+				
 		elif package_manager == 'apt-file':
 			provides_output = run("apt-file search %s" % (command))
 			## JIM: Parse it
@@ -540,14 +548,19 @@ def service_ensure( name, runlevels=None, restart=False):
 
 
 # JIM: still missing --
+#        - lean a bit more on fabric.contrib (esp. fabric.contrib.file for things like file exists, sed,
+#          templating, etc.)
 #        - kernel params and sysctl checking/config
 #        - network config and net devices
-#        - templating that is better than basic python string templating (necessary?  tempita?)
 #        - the file_write function seems a bit strange; why not use fabric.apt.get() to pull a copy,
 #          put it into a tmpfile, manipulate the tmpfile, and the fabric.api.put() it back?  If we
 #          are concerned about safety we can put the file to a remote tmpfile and then mv it into
 #          place.  If this is done, use "find <<filename>> -prune -printf '%m %U %G\n'" to get the
 #          perms, owner, and group so that we can reset them afterwards.
+#        - bsd compatibility (ports system, osx support, bsd find does not have printf so get_fs_attr
+#          would need to call stat instead, etc.)
+#        - user_create/user_ensure should interpret a None password as the user needing to be set to !! as
+#          the encrypted password
 
 ## JIM: package installs need to go back and do a check to make sure the package is installed (should upgrade
 ## check to make sure a newer rev is installed?) and return proper .success or .failure.  We can't just
