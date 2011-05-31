@@ -10,7 +10,7 @@ from cuisine import (
     text_ensure_line,
     text_strip_margin,
     text_template,
-    local_read
+    local_read,
     file_read,
     file_exists,
     file_attribs,
@@ -41,3 +41,4 @@ from cuisine import (
     service_stop,
     service_ensure,
     )
+

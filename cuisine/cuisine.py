@@ -2,6 +2,8 @@
 # Project   : Cuisine - Functions to write Fabric recipies
 # -----------------------------------------------------------------------------
 # Author    : Sebastien Pierre                            <sebastien@ffctn.com>
+# Author    : Thierry Stiegler   (gentoo port)     <thierry.stiegler@gmail.com>
+# Author    : Jim McCoy (distro checks and rpm port)      <jim.mccoy@gmail.com>
 # License   : Revised BSD License
 # -----------------------------------------------------------------------------
 # Creation  : 26-Apr-2010
@@ -19,7 +21,6 @@ and groups) in Python functions.
 Cuisine is designed to work with Fabric and provide all you need for getting
 your new server up and running in minutes.
 
-Note that right now, Cuisine only supports Debian-based Linux systems.
 """
 
 # See <http://lethain.com/entry/2008/nov/04/deploying-django-with-fabric/>
@@ -75,18 +76,18 @@ def mode_sudo():
 	global MODE
 	MODE = "sudo"
 
-def run(*args):
+def run(*args, **kwargs):
 	"""A wrapper to Fabric's run/sudo commands, using the 'cuisine.MODE' global
 	to tell wether the command should be run as regular user or sudo."""
 	if MODE == "sudo":
-		return fabric.api.sudo(*args)
+		return fabric.api.sudo(*args, **kwargs)
 	else:
-		return fabric.api.run(*args)
+		return fabric.api.run(*args, **kwargs)
 
-def sudo(*args):
+def sudo(*args, **kwargs):
 	"""A wrapper to Fabric's run/sudo commands, using the 'cuisine.MODE' global
 	to tell wether the command should be run as regular user or sudo."""
-	return fabric.api.sudo(*args)
+	return fabric.api.sudo(*args, **kwargs)
 
 def multiargs(function):
 	"""Decorated functions will be 'map'ed to every element of the first argument
@@ -250,30 +251,42 @@ def command_check( command ):
 def distro_check():
 	"""Determines the distro and package manager for a remote host and caches it for future reference"""
 	global HOST_INFO_MAP
-	if env.host in HOST_INFO_MAP and 'distro' in HOST_INFO_MAP[env.host].keys():
-		return HOST_INFO_MAP[env.host]
+	if fabric.api.env.host in HOST_INFO_MAP and 'distro' in HOST_INFO_MAP[fabric.api.env.host].keys():
+		return HOST_INFO_MAP[fabric.api.env.host]
+	if fabric.api.env.host not in HOST_INFO_MAP:
+		HOST_INFO_MAP[fabric.api.env.host]={}
+	# These next two checks will try to figure out the distro on the remote host and what pacakge
+	# manager is available.  Make the checks in order of preference, the first hit in each check will
+	# be returned as the "correct" selection for that host.
+	#
+	# Determine distro
 	distro_check=r"""if [ -r /etc/lsb-release ]; then
 echo $(grep 'DISTRIB_ID' /tmp/lsb-release | sed 's/DISTRIB_ID=//' | head -1 | tr '[:upper:]' '[:lower:]');
 else
 echo $(find /etc/ -maxdepth 1 -name '*[-_]release' -o -name '*[-_]version' 2> /dev/null |
 sed 's#/etc/##;s/[_-]version//;s/[-_]release//' | head -1 | tr '[:upper:]' '[:lower:]');
 fi"""
-	package_manager_check=r"""(which yum >& /dev/null && echo 'yum' || which apt-get >& /dev/null && echo 'apt-get'); true"""
 	distro = run(distro_check)
 	if len(distro) == 0:
-		HOST_INFO_MAP[env.host]['distro']=None
+		HOST_INFO_MAP[fabric.api.env.host]['distro']=None
 	else:
-		HOST_INFO_MAP[env.host]['distro']=distro
+		HOST_INFO_MAP[fabric.api.env.host]['distro']=distro
+	# Determine package manager
+	package_manager_check=r"""((which yum >& /dev/null && echo 'yum') ||
+(which apt-get >& /dev/null && echo 'apt-get') ||
+(which emerge >& /dev/null && echo 'emerge')); true"""
 	package_manager = run(package_manager_check)
 	if len(package_manager) == 0:
-		HOST_INFO_MAP[env.host]['pkg_mgr']=None
+		HOST_INFO_MAP[fabric.api.env.host]['pkg_mgr']=None
 	else:
-		HOST_INFO_MAP[env.host]['pkg_mgr']=package_manager
+		HOST_INFO_MAP[fabric.api.env.host]['pkg_mgr']=package_manager
+	# Determine package manager helper if necessary (something that will tell us what package to
+	# install so that we get command X)
        	if package_manager == "apt-get":
 		helper_check = run("which apt-file >& /dev/null %% echo 'apt-file'")
-		if len(helper_check) > 0:
-			HOST_INFO_MAP[env.host].setdefault('pkg_mgr_helpers', []).append('apt-file')
-	return HOST_INFO_MAP[env.host]
+		if helper_check=="apt-file":
+			HOST_INFO_MAP[fabric.api.env.host].setdefault('pkg_mgr_helpers', []).append('apt-file')
+	return HOST_INFO_MAP[fabric.api.env.host]
 
 def package_db_update( force=False ):
 	"""Update the package datebase if necessary."""
@@ -286,14 +299,17 @@ def package_db_update( force=False ):
 		package_manager=distro_info.get('pkg_mgr')
 		if package_manager == 'yum':
 			sudo("yum makecache")
-			HOST_INFO_MAP[env.host]['db_update'] = now
+			HOST_INFO_MAP[fabric.api.env.host]['db_update'] = now
 		elif package_manager == 'apt-get':
 			sudo("apt-get --yes update")
 			if 'apt-file' in distro_info.get('pkg_mgr_helpers', []):
 				sudo("apt-file update")
-			HOST_INFO_MAP[env.host]['db_update'] = now
+			HOST_INFO_MAP[fabric.api.env.host]['db_update'] = now
+		elif package_manager == 'emerge':
+			sudo("emerge --sync -q")
+			HOST_INFO_MAP[fabric.api.env.host]['db_update'] = now
 
-def package_update( package, db_update=False ):
+def package_update( package, db_update=False, use_flags=None ):
 	"""Update the package or list of packages given as argument."""
 	package_db_update(db_update)
 	if type(package) in (list,tuple): package = " ".join(package)
@@ -302,19 +318,47 @@ def package_update( package, db_update=False ):
 		sudo("yum upgrade -y " +package)
 	elif package_manager == 'apt-get':
 		sudo("apt-get --yes upgrade " + package)
+	elif package_manager == 'emerge':
+		### XXX: FIX THIS
+		sudo("")
 
-def package_install( package, upgrade=False, db_update=False ):
+def package_install( package, upgrade=False, db_update=False, use_flags=None ):
 	"""Installs the given package/list of package, optionaly upgrading an already
 	installed package."""
 	package_db_update(db_update)
-	if upgrade:
-		package_update(package)
 	if type(package) in (list,tuple): package = " ".join(package)
 	package_manager=distro_check().get('pkg_mgr')
 	if package_manager == 'apt-get':
 		sudo("apt-get --yes install " + package)
 	elif package_manager == 'yum':
 		sudo("yum install -y " +package)
+	elif package_manager == 'emerge':
+		sudo("%s emerge %s" % (package_use_flags(use_flags), package))
+	# Rather than figuring out what is out of date just install first and upgrade second.
+	if upgrade:
+		package_update(package)
+
+
+
+def package_remove( package, db_update=False ):
+	"""Remove the package or list of packages given as argument."""
+	package_db_update(db_update)
+	if type(package) in (list,tuple): package = " ".join(package)
+	package_manager=distro_check().get('pkg_mgr')
+	if package_manager == 'yum':
+		sudo("yum erase -y " + package)
+	elif package_manager == 'apt-get':
+		sudo("apt-get --yes remove " + package)
+	elif package_manager == 'emerge':
+		sudo("emerge -C " + package)
+
+def package_use_flags( use_flags ):
+	if not use_flags:
+		use_flags=""
+	elif type(use_flags) in (list, tuple):
+		 use_flags=" ".join(use_flags)
+	use_flags="USE=%s" % use_flags
+	return use_flags
 
 def package_localinstall( package_path ):
 	"""Install a package that is found in a particular filesystem path instead of
@@ -369,7 +413,8 @@ def command_ensure( command, package=None ):
 		if package_manager == 'yum':
 			provides_output = run("yum -d 1 provides '%s' 2> /dev/null | egrep -v '^$|^ |^Matched|^Other|^Repo' | awk -F':' '{print $1}'" % (command))
 			if len(provides_ouput) > 0:
-				
+				## XXX: finish parse
+				pass
 		elif package_manager == 'apt-file':
 			provides_output = run("apt-file search %s" % (command))
 			## JIM: Parse it
@@ -507,6 +552,22 @@ def ssh_authorize( user, key ):
 	else:
 		file_write(keyf, key)
 
+def remove_known_host(hostname, username=None):
+	"""Remove hostname (and IP address of hostname if we can get it) from the
+	local known_hosts file of the user running the command or a specified username."""
+	if not username:
+		username = fabric.api.env.user
+	known_hosts = "~%s/.ssh/known_hosts" % username
+	known_hosts_bak = known_hosts + '.bak'
+	ipaddr_check=subprocess.Popen(["dig", hostname, "+short"], stdout=subprocess.PIPE)
+        ipaddr=ipaddr_check.communicate()[0]
+	if os.path.exists(known_hosts):
+		local("cp %s %s" % (known_hosts, known_hosts_bak))
+		if len(ipaddr.split("."))==4:
+			local("sed '/%s/d;/%s/d' %s > %s" % (hostname, ipaddr, known_hosts_bak, known_hosts))
+		else:
+			local("sed '/%s/d' %s > %s" % (hostname, known_hosts_bak, known_hosts))
+
 def service_stop(name, no_start=False):
 	"""Stop a service, clearing its runlevels if requested."""
 	if distro_check().get("distro") in ("debian", "ubuntu"):
@@ -561,6 +622,11 @@ def service_ensure( name, runlevels=None, restart=False):
 #          would need to call stat instead, etc.)
 #        - user_create/user_ensure should interpret a None password as the user needing to be set to !! as
 #          the encrypted password
+#        - relplace all of the various platform-specific if clauses with templates.  Define a command
+#          dict that has the various commands as templates and then create the arg dicts from the function
+#          params and env and then run the a string template substitution.  Need to convert None args to
+#          an empty string (perhaps creating a defaultdict for the params that returns '' if the key is
+#          None but still raising a KeyError is we need a param and it is not there)
 
 ## JIM: package installs need to go back and do a check to make sure the package is installed (should upgrade
 ## check to make sure a newer rev is installed?) and return proper .success or .failure.  We can't just
