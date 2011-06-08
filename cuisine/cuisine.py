@@ -470,7 +470,8 @@ def user_ensure( name, passwd=None, home=None, uid=None, gid=None, shell=None):
 			options.append("-g '%s'" % (gid))
 		if shell != None and d.get("shell") != shell:
 			options.append("-s '%s'" % (shell))
-		sudo("usermod %s '%s'" % (" ".join(options), name))
+		if options:
+			sudo("usermod %s '%s'" % (" ".join(options), name))
 
 def group_create( name, gid=None ):
 	"""Creates a group with the given name, and optionally given gid."""
@@ -557,16 +558,17 @@ def remove_known_host(hostname, username=None):
 	local known_hosts file of the user running the command or a specified username."""
 	if not username:
 		username = fabric.api.env.user
-	known_hosts = "~%s/.ssh/known_hosts" % username
-	known_hosts_bak = known_hosts + '.bak'
+	if username:
+		known_hosts = "~%s/.ssh/known_hosts" % username
+	else:
+		known_hosts = "~/.ssh/known_hosts"
 	ipaddr_check=subprocess.Popen(["dig", hostname, "+short"], stdout=subprocess.PIPE)
         ipaddr=ipaddr_check.communicate()[0]
 	if os.path.exists(known_hosts):
-		local("cp %s %s" % (known_hosts, known_hosts_bak))
 		if len(ipaddr.split("."))==4:
-			local("sed '/%s/d;/%s/d' %s > %s" % (hostname, ipaddr, known_hosts_bak, known_hosts))
+			local("sed -i'' '/%s/d;/%s/d' %s > %s" % (hostname, ipaddr, known_hosts))
 		else:
-			local("sed '/%s/d' %s > %s" % (hostname, known_hosts_bak, known_hosts))
+			local("sed -i'' '/%s/d' %s > %s" % (hostname, known_hosts))
 
 def service_stop(name, no_start=False):
 	"""Stop a service, clearing its runlevels if requested."""
