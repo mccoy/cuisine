@@ -216,11 +216,9 @@ def file_update( location, updater=lambda x:x):
 	,"Updater must be like (string)->string, got: %s() = %s" % (updater, type(new_content))
 	run("echo '%s' | base64 -d > \"%s\"" % (base64.b64encode(new_content), location))
 
-def file_append( location, content, mode=None, owner=None, group=None ):
-	"""Appends the given content to the remote file at the given location, optionally
-	updating its mode/owner/group."""
-	run("echo '%s' | base64 -d >> \"%s\"" % (base64.b64encode(content), location))
-	file_attribs(location, mode, owner, group)
+def file_append( location, content, use_sudo=False, partial=False, escape=True):
+	"""Wrapper for fabric.contrib.files.append."""
+	fabric.contrib.files.append(location, content, use_sudo, partial, escape)
 
 def dir_attribs(location, mode=None, owner=None, group=None, recursive=False):
 	"""Updates the mode/owner/group for the given remote directory."""
@@ -298,15 +296,15 @@ def package_db_update( force=False ):
 	if force or last_check+PKG_DB_UPDATE_FREQ < now:
 		package_manager=distro_info.get('pkg_mgr')
 		if package_manager == 'yum':
-			sudo("yum makecache")
+			sudo("yum makecache >& /dev/null")
 			HOST_INFO_MAP[fabric.api.env.host]['db_update'] = now
 		elif package_manager == 'apt-get':
-			sudo("apt-get --yes update")
+			sudo("apt-get --yes update >& /dev/null")
 			if 'apt-file' in distro_info.get('pkg_mgr_helpers', []):
 				sudo("apt-file update")
 			HOST_INFO_MAP[fabric.api.env.host]['db_update'] = now
 		elif package_manager == 'emerge':
-			sudo("emerge --sync -q")
+			sudo("emerge --sync -q >& /dev/null")
 			HOST_INFO_MAP[fabric.api.env.host]['db_update'] = now
 
 def package_update( package, db_update=False, use_flags=None ):
@@ -573,39 +571,39 @@ def remove_known_host(hostname, username=None):
 def service_stop(name, no_start=False):
 	"""Stop a service, clearing its runlevels if requested."""
 	if distro_check().get("distro") in ("debian", "ubuntu"):
-		sudo("stop %s" % name)
+		sudo("stop %s >& /dev/null; true" % name)
 		if no_start:
-			sudo("update-rc.d -f %s remove" % name)
+			sudo("update-rc.d -f %s remove ; true" % name)
 	elif distro_check().get("distro") in ("redhat", "fedora"):
-		sudo("service %s stop" % name)
+		sudo("service %s stop >& /dev/null ; true" % name)
 		if no_start:
-			sudo("chkconfig %s off" % name)
+			sudo("chkconfig %s off ; true" % name)
 	elif distro_check().get("distro") in ("gentoo"):
-		sudo("stop %s" % name)
+		sudo("stop %s >& /dev/null ; true" % name)
 		if no_start:
-			sudo("rc-update del %s default" % name)
+			sudo("rc-update del %s default ; true" % name)
 	
 def service_ensure( name, runlevels=None, restart=False):
 	"""Ensure that a named service is running (or restart) and set runlevels."""
+	# Using a "stop then start" pattern instead of just calling restart because
+	# the latter may return a non-zero exit if the service was not running in the
+	# first place, and we really only care about getting the service running.
 	if distro_check().get("distro") in ("debian", "ubuntu"):
 		if restart:
-			sudo("restart %s" % name)
-		else:
-			sudo("start %s" % name)
+			service_stop(name)
+		sudo("start %s" % name)
 		if runlevels: # Upstart is not as fine-grained as chkconfig, so we use "defaults"
 			sudo("update-rc.d %s defaults" % (name))
 	elif distro_check().get("distro") in ("redhat", "fedora"):
 		if restart:
-			sudo("service %s restart" % name)
-		else:
-			sudo("service %s start" % name)
+			service_stop(name)
+		sudo("service %s start" % name)
 		if runlevels:
 			sudo("chkconfig --levels %s %s on" % (runlevels, name))
 	elif distro_check().get("distro") in ("gentoo"):
 		if restart:
-			sudo("restart %s" % name)
-		else:
-			sudo("start %s" % name)
+			service_stop(name)
+		sudo("start %s" % name)
 		if runlevels: # Upstart is not as fine-grained as chkconfig, so we use "defaults"
 			sudo("rc-update add %s default" % (name))	
 
@@ -629,6 +627,7 @@ def service_ensure( name, runlevels=None, restart=False):
 #          params and env and then run the a string template substitution.  Need to convert None args to
 #          an empty string (perhaps creating a defaultdict for the params that returns '' if the key is
 #          None but still raising a KeyError is we need a param and it is not there)
+#        - add a groupdel and userdel bit (with ability to specify login.defs vars as method args)
 
 ## JIM: package installs need to go back and do a check to make sure the package is installed (should upgrade
 ## check to make sure a newer rev is installed?) and return proper .success or .failure.  We can't just
