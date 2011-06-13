@@ -11,7 +11,7 @@
 # -----------------------------------------------------------------------------
 
 import fabric, fabric.api, fabric.context_managers
-import os, base64, bz2, string, re, time
+import os, base64, bz2, string, re, time, subprocess
 
 __doc__ = """
 Cuisine makes it easy to write automatic server installation and configuration
@@ -628,6 +628,8 @@ def service_ensure( name, runlevels=None, restart=False):
 #          an empty string (perhaps creating a defaultdict for the params that returns '' if the key is
 #          None but still raising a KeyError is we need a param and it is not there)
 #        - add a groupdel and userdel bit (with ability to specify login.defs vars as method args)
+#        - fix service_stop & service_ensure to deal better with services that do not exist (do not complain
+#          about trying to stop them but do complain about trying to start them, etc.)
 
 ## JIM: package installs need to go back and do a check to make sure the package is installed (should upgrade
 ## check to make sure a newer rev is installed?) and return proper .success or .failure.  We can't just
