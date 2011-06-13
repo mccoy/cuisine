@@ -555,18 +555,18 @@ def remove_known_host(hostname, username=None):
 	"""Remove hostname (and IP address of hostname if we can get it) from the
 	local known_hosts file of the user running the command or a specified username."""
 	if not username:
-		username = fabric.api.env.user
-	if username:
-		known_hosts = "~%s/.ssh/known_hosts" % username
+		known_hosts = os.path.expanduser("~/.ssh/known_hosts")
 	else:
-		known_hosts = "~/.ssh/known_hosts"
+		known_hosts = os.path.expanduser("~%s/.ssh/known_hosts" % username)
 	ipaddr_check=subprocess.Popen(["dig", hostname, "+short"], stdout=subprocess.PIPE)
         ipaddr=ipaddr_check.communicate()[0]
+	if ipaddr[-1] == "\n":
+		ipaddr=ipaddr[:-1]
 	if os.path.exists(known_hosts):
 		if len(ipaddr.split("."))==4:
-			local("sed -i'' '/%s/d;/%s/d' %s > %s" % (hostname, ipaddr, known_hosts))
+			fabric.operations.local("sed -i '' '/%s/d;/%s/d' %s" % (hostname, ipaddr, known_hosts))
 		else:
-			local("sed -i'' '/%s/d' %s > %s" % (hostname, known_hosts))
+			fabric.operations.local("sed -i '' '/%s/d' %s" % (hostname, known_hosts))
 
 def service_stop(name, no_start=False):
 	"""Stop a service, clearing its runlevels if requested."""
