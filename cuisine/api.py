@@ -38,6 +38,7 @@ from cuisine import (
     group_user_ensure,
     ssh_keygen,
     ssh_authorize,
+    remove_known_host,
     service_stop,
     service_ensure,
     )
